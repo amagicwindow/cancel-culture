@@ -1,5 +1,7 @@
 pub mod parser;
 pub mod search;
+mod tweet_lister;
+pub use tweet_lister::TweetLister;
 
 use fantoccini::error::CmdError;
 use fantoccini::{Client, Locator};
@@ -12,7 +14,7 @@ pub async fn status_exists(client: &mut Client, id: u64) -> Result<bool, CmdErro
     let url = format!("https://twitter.com/tweet/status/{}", id);
 
     client.goto(&url).await?;
-    let mut heading = client.wait().forever().for_element(HEADING_LOC).await?;
+    let heading = client.wait().forever().for_element(HEADING_LOC).await?;
 
     Ok(heading
         .attr("data-testid")
@@ -29,14 +31,14 @@ pub async fn is_logged_in(client: &mut Client) -> Result<bool, CmdError> {
 pub async fn log_in(client: &mut Client, username: &str, password: &str) -> Result<bool, CmdError> {
     client.goto("https://twitter.com/login").await?;
 
-    let mut username_input = client
+    let username_input = client
         .wait()
         .forever()
         .for_element(Locator::Css("input[name='session[username_or_email]']"))
         .await?;
     username_input.send_keys(username).await?;
 
-    let mut password_input = client
+    let password_input = client
         .wait()
         .forever()
         .for_element(Locator::Css("input[name='session[password]']"))
@@ -67,15 +69,23 @@ pub async fn shoot_tweet_bytes(
         tokio::time::sleep(duration).await;
     }
 
+    // There may be a cookies layer. If so we hide it.
+    client
+        .execute(
+            "document.getElementById('layers').children[0].style.display = 'none';",
+            vec![],
+        )
+        .await?;
+
     client.screenshot().await
 }
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum ScreenshotError {
-        DownloadError(err: fantoccini::error::CmdError) { from() }
-        ImageDecodingError(err: image::error::ImageError) { from() }
-    }
+#[derive(thiserror::Error, Debug)]
+pub enum ScreenshotError {
+    #[error("Download error")]
+    Download(#[from] fantoccini::error::CmdError),
+    #[error("Image decoding error")]
+    ImageDecoding(#[from] image::error::ImageError),
 }
 
 pub async fn shoot_tweet(
@@ -91,6 +101,12 @@ pub async fn shoot_tweet(
 }
 
 const RGBA_WHITE: Rgba<u8> = Rgba([255, 255, 255, 255]);
+
+// TODO: Figure out why this is necessary for finding the right edge in some cases.
+fn is_very_light_gray(pixel: &Rgba<u8>) -> bool {
+    let threshhold = 253;
+    pixel.0[0] >= threshhold && pixel.0[1] >= threshhold && pixel.0[2] >= threshhold
+}
 
 pub fn crop_tweet<I: GenericImageView<Pixel = Rgba<u8>>>(
     buffer: &I,
@@ -116,7 +132,9 @@ pub fn crop_tweet<I: GenericImageView<Pixel = Rgba<u8>>>(
 
     // Continue moving right to the second intersecting line.
     while i < w {
-        if buffer.get_pixel(i, 0) != RGBA_WHITE {
+        let pixel = buffer.get_pixel(i, 0);
+
+        if !is_very_light_gray(&pixel) {
             right_edge = Some(i - 1);
             break;
         }
@@ -127,22 +145,52 @@ pub fn crop_tweet<I: GenericImageView<Pixel = Rgba<u8>>>(
         .zip(right_edge)
         .zip(gray)
         .and_then(|((left, right), gray)| {
-            i = 0;
-
             let mut upper_edge = None;
             let mut lower_edge = None;
+            let mut i = 0;
 
-            // Start at the top at the newly-discovered left edge, move down until the first line.
+            // We no longer have a top border, so we find the top of the profile image and count up from there.
+            // This is a terrible hack and needs to be improved.
+
+            // Find the top of the text above the profile image.
             while i < h {
-                if buffer.get_pixel(left, i) != RGBA_WHITE {
-                    upper_edge = Some(i + 2);
-                    i += 2;
+                if (left..=right)
+                    .map(|j| buffer.get_pixel(j, i))
+                    .any(|p| p != RGBA_WHITE)
+                {
                     break;
                 }
                 i += 1;
             }
 
-            // And the next line, which represents the bottom of the tweet, including the actions.
+            // Find the base of the text.
+            while i < h {
+                if !(left..=right)
+                    .map(|j| buffer.get_pixel(j, i))
+                    .any(|p| p != RGBA_WHITE)
+                {
+                    break;
+                }
+                i += 1;
+            }
+            let text_base = i;
+
+            // Find the top of the profile image.
+            while i < h {
+                if (left..=right)
+                    .map(|j| buffer.get_pixel(j, i))
+                    .any(|p| p != RGBA_WHITE)
+                {
+                    break;
+                }
+                i += 1;
+            }
+
+            upper_edge = Some(text_base + (i - text_base) / 2);
+
+            let mut i = 0;
+
+            // The first line represents the bottom of the tweet, including the actions.
             while i < h {
                 if buffer.get_pixel(left, i) != RGBA_WHITE {
                     lower_edge = Some(i - 1);
@@ -152,14 +200,16 @@ pub fn crop_tweet<I: GenericImageView<Pixel = Rgba<u8>>>(
             }
 
             upper_edge.zip(lower_edge).and_then(|(upper, lower)| {
-                i = lower;
+                // We move up two pixels because of a new double line.
+                // This should be fairly robust, since the target will always be higher anyway.
+                i = lower - 2;
 
                 let middle = left + (right - left) / 2;
                 let mut base = None;
 
                 // Finally move up until you hit another gray line.
                 while i > 0 {
-                    if buffer.get_pixel(middle, i) == gray {
+                    if buffer.get_pixel(middle, i) != RGBA_WHITE {
                         base = Some(i - 2);
                         break;
                     }
@@ -187,11 +237,11 @@ mod tests {
         let examples = vec![
             (
                 "examples/images/703033780689199104-full.png",
-                Some((252, 108, 1195, 423)),
+                Some((253, 99, 1195, 494)),
             ),
             (
-                "examples/images/1302424011511529474-full.png",
-                Some((252, 108, 1195, 665)),
+                "examples/images/1503631923154984960-full.png",
+                Some((253, 99, 1195, 1184)),
             ),
         ];
 

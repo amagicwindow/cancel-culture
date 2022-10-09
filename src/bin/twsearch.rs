@@ -1,5 +1,5 @@
 use cancel_culture::{browser::make_client_or_panic, cli};
-use clap::{crate_authors, crate_version, Parser};
+use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,8 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await;
 
-    let client = cancel_culture::twitter::Client::from_config_file(&opts.key_file).await?;
-    let mut lister = cancel_culture::twitter::TweetLister::new(&client, &mut browser);
+    let client = egg_mode_extras::Client::from_config_file(&opts.key_file).await?;
+    let mut lister = cancel_culture::browser::twitter::TweetLister::new(&client, &mut browser);
 
     let (mut ids, expected) = lister.get_all(opts.screen_name).await?;
 
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Parser)]
-#[clap(version = crate_version!(), author = crate_authors!())]
+#[clap(version, author)]
 struct Opts {
     /// TOML file containing Twitter API keys
     #[clap(short, long, default_value = "keys.toml")]

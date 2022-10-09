@@ -6,9 +6,8 @@ use std::fs::{read_dir, DirEntry, File};
 use std::io::{self, Read};
 use std::iter::once;
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Unexpected item: {path:?}")]
     Unexpected { path: Box<Path> },
@@ -65,7 +64,7 @@ impl ValidStore {
             .map_ok(|(expected, path)| {
                 tokio::spawn(async {
                     let mut file = File::open(path)?;
-                    match super::digest::compute_digest_gz(&mut file) {
+                    match wayback_rs::digest::compute_digest_gz(&mut file) {
                         Ok(actual) => Ok((expected, actual)),
                         Err(error) => Err(Error::ItemIOError {
                             digest: expected,
@@ -161,7 +160,7 @@ impl ValidStore {
                         Ok(None)
                     } else {
                         let mut file = File::open(path)?;
-                        let digest = super::digest::compute_digest_gz(&mut file)?;
+                        let digest = wayback_rs::digest::compute_digest_gz(&mut file)?;
 
                         if digest == name {
                             Ok(Some(Ok((name.to_string(), location))))

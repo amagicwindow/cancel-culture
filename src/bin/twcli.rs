@@ -1,6 +1,8 @@
-use cancel_culture::{cli, twitter::Client};
-use clap::{crate_authors, crate_version, Parser};
+use cancel_culture::cli;
+use chrono::Utc;
+use clap::Parser;
 use egg_mode::user::UserID;
+use egg_mode_extras::{client::TokenType, Client};
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use std::collections::HashSet;
@@ -32,6 +34,42 @@ async fn main() -> Void {
                     println!("{},{}", id, tweet_id);
                 }
             }
+        }
+        SubCommand::UserJson { timestamp } => {
+            let stdin = std::io::stdin();
+            let handle = stdin.lock();
+            let ids = handle
+                .lines()
+                .map(|line| line.ok().and_then(|input| input.parse::<u64>().ok()))
+                .collect::<Option<HashSet<u64>>>()
+                .unwrap();
+
+            let users = client.lookup_users_json(ids, TokenType::App);
+            let timestamp = timestamp.as_ref();
+
+            users
+                .try_for_each(|mut user| async move {
+                    if let Some(fields) = user.as_object_mut() {
+                        if let Some(timestamp_field_name) = timestamp {
+                            if let Some(previous_value) = fields.insert(
+                                timestamp_field_name.clone(),
+                                serde_json::json!(Utc::now().timestamp()),
+                            ) {
+                                log::warn!(
+                                    "Timestamp field collision: \"{}\" was {}",
+                                    timestamp_field_name,
+                                    previous_value
+                                );
+                            }
+                        }
+                    } else {
+                        log::warn!("Not a JSON object: {}", user);
+                    }
+
+                    println!("{}", user);
+                    Ok(())
+                })
+                .await?
         }
         SubCommand::UserInfo { db, md } => {
             let stdin = std::io::stdin();
@@ -74,7 +112,7 @@ async fn main() -> Void {
                         id,
                         names
                             .iter()
-                            .map(|name| name.replace("|", "\\|"))
+                            .map(|name| name.replace('|', "\\|"))
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
@@ -94,7 +132,7 @@ async fn main() -> Void {
                         result
                             .names
                             .iter()
-                            .map(|name| name.replace(";", "\\;"))
+                            .map(|name| name.replace(';', "\\;"))
                             .collect::<Vec<_>>()
                             .join(";"),
                     ];
@@ -114,7 +152,7 @@ async fn main() -> Void {
                 .collect::<Option<Vec<u64>>>()
                 .unwrap();
             let mut missing = ids.iter().cloned().collect::<HashSet<_>>();
-            let results = client.lookup_users(ids);
+            let results = client.lookup_users(ids, TokenType::App);
 
             let valid = results
                 .filter_map(|res| async move {
@@ -164,12 +202,12 @@ async fn main() -> Void {
             missing2.reverse();
 
             futures::stream::select(
-                client.show_users(missing1),
-                client.show_users_user_token(missing2),
+                client.lookup_users_or_status(missing1, TokenType::App),
+                client.lookup_users_or_status(missing2, TokenType::User),
             )
             .try_for_each(|res| async move {
-                if let Err((UserID::ID(id), code)) = res {
-                    println!("{:?},{}", id, code);
+                if let Err((UserID::ID(id), status)) = res {
+                    println!("{:?},{}", id, status.code());
                 };
                 Ok(())
             })
@@ -183,7 +221,7 @@ async fn main() -> Void {
 }
 
 #[derive(Parser)]
-#[clap(name = "twcli", version = crate_version!(), author = crate_authors!())]
+#[clap(name = "twcli", version, author)]
 struct Opts {
     /// TOML file containing Twitter API keys
     #[clap(short, long, default_value = "keys.toml")]
@@ -210,5 +248,10 @@ enum SubCommand {
     TweetIdsByUserId {
         #[clap(long)]
         db: String,
+    },
+    UserJson {
+        /// Timestamp field name to add to Twitter JSON object
+        #[clap(short, long)]
+        timestamp: Option<String>,
     },
 }
