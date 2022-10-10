@@ -7,3 +7,5 @@ keys.toml
 twitter.db
 .metals
 .vscode
+/output
+*/**/*deleted_tweets.md
