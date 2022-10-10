@@ -8,4 +8,3 @@ twitter.db
 .metals
 .vscode
 /output
-*/**/*deleted_tweets.md
